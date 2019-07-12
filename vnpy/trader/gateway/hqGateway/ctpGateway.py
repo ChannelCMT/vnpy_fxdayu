@@ -469,7 +469,7 @@ class CtpGateway(VtGateway):
             # self.send_TP(str(order.orderID), order.byStrategy, [data])
 
     def matchOrder(self, tick):
-        if all([self.low,self.high]):
+        if not all([self.low,self.high]):
             self.high = tick.lastPrice
             self.low = tick.lastPrice
         self.high = max(self.high, tick.lastPrice)
@@ -490,7 +490,7 @@ class CtpGateway(VtGateway):
         self.time = tick.datetime.replace(second=0, microsecond=0) + timedelta(minutes = 1)
         
     def processPos(self):
-        print("processPos:", datetime.now())
+        print("processPos:", datetime.now(),self.positions)
         for strategyId, pos in self.positions.items():
             data = []
             for symbol, volume in pos.items():
