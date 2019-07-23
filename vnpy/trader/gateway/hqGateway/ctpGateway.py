@@ -119,6 +119,7 @@ class CtpGateway(VtGateway):
         self.time = None
         self.pendingOrder = {}
         self.positions = {}
+        self.accountDict = {}
         self.contractMap = {}
         self.ref = int(datetime.today().strftime("%Y%m%d")) * 10000
         self.send_TP_Time = None
@@ -160,6 +161,19 @@ class CtpGateway(VtGateway):
             log.logContent = text.CONFIG_KEY_MISSING
             self.onLog(log)
             return
+
+        # with open(f"{getTempPath('account.json')}","r") as f:
+        #     self.accountDict = json.load(f)
+        # f.close()
+        try:
+            f = open(f"{getTempPath('position.json')}", "r", encoding="utf-8")
+            self.positions = json.load(f)
+            f.close()
+        except IOError:
+            log = VtLogData()
+            log.gatewayName = self.gatewayName
+            log.logContent = "position.json not found"
+            self.onLog(log)
 
         # 创建行情和交易接口对象
         self.mdApi.connect(userID, password, brokerID, mdAddress)
@@ -237,7 +251,7 @@ class CtpGateway(VtGateway):
         self.qryAccount()
         self.qryOrder()
         self.qryPosition()
-        self.processPos()
+        
     def initQuery(self, freq = 60):
         """初始化连续查询"""
         if self.qryEnabled:
@@ -419,6 +433,20 @@ class CtpGateway(VtGateway):
         order.orderDatetime = datetime.now()
         order.orderTime = order.orderDatetime.strftime("%Y%m%d %H:%M:%S")
         order.byStrategy = data["byStrategy"]
+
+        # if order.offset == OFFSET_OPEN:
+        #     available = self.accountDict.get("available", 0)
+        #     if order.direction == DIRECTION_LONG:
+        #         used_margin = self.contractMap[order.symbol]["long_marginrate"] *order.price *order.volume
+        #     elif order.direction == DIRECTION_SHORT:
+        #         used_margin = self.contractMap[order.symbol]["short_marginrate"] *order.price *order.volume
+
+            # if available < used_margin:
+            #     return None
+            # else:
+            #     self.accountDict.update({"available":available - used_margin})
+            #     with open(f"{getTempPath('account.json')}","w") as f:
+            #         json.dump(self.accountDict, f, indent=4, ensure_ascii=False)
         return order
 
     def deal(self,price,orderid):
@@ -447,26 +475,38 @@ class CtpGateway(VtGateway):
             self.onTrade(trade)
 
             p = self.positions.get(order.byStrategy, {})
-            self.positions.update({order.byStrategy:p})
             pos = p.get(order.symbol, 0)
+            # price, pos = p.get(order.symbol, [0,0])
             if order.offset == OFFSET_OPEN:
                 if order.direction == DIRECTION_LONG:
+                    # p_new = (price*pos + trade.price*order.totalVolume) / (pos+order.totalVolume)
                     pos += order.totalVolume
                 else:
+                    # p_new = (price*pos - trade.price*order.totalVolume) / (pos-order.totalVolume)
                     pos -= order.totalVolume
             elif order.offset == OFFSET_CLOSE:
                 if order.direction == DIRECTION_LONG:
+                    # p_new = (price*pos - trade.price*order.totalVolume) / (pos-order.totalVolume)
                     pos -= order.totalVolume
+                    # pnl = (price - trade.price) * order.totalVolume * self.contractMap[order.symbol]["multiple"]
                 else:
+                    # p_new = (price*pos + trade.price*order.totalVolume) / (pos+order.totalVolume)
                     pos += order.totalVolume
-            self.positions[order.byStrategy].update({order.symbol:int(pos)})
+                    # pnl = (trade.price - price) * order.totalVolume * self.contractMap[order.symbol]["multiple"]
+                # balance, available = self.accountDict.get("balance",0), self.accountDict.get("available",0)
+                # self.accountDict.update({"balance":balance+pnl,"available":available+pnl})
+                # with open(f"{getTempPath('account.json')}","w") as f:
+                #     json.dump(self.accountDict, f, indent=4, ensure_ascii=False)
+            # self.positions.update({order.byStrategy:{order.symbol:[p_new, int(pos)]}})
+            self.positions.update({order.byStrategy:{order.symbol:int(pos)}})
 
-            data ={
-                "market": self.contractMap[order.symbol],
-                "symbol": order.symbol,
-                "volume": abs(pos)
-            }
+            # data ={
+            #     "market": self.contractMap[order.symbol]["exchange"],
+            #     "symbol": order.symbol,
+            #     "volume": abs(pos)
+            # }
             # self.send_TP(str(order.orderID), order.byStrategy, [data])
+        
 
     def matchOrder(self, tick):
         if not all([self.low,self.high]):
@@ -488,14 +528,15 @@ class CtpGateway(VtGateway):
                 self.high = 0
                 self.low = 0
         self.time = tick.datetime.replace(second=0, microsecond=0) + timedelta(minutes = 1)
+        self.processPos()
         
     def processPos(self):
-        print("processPos:", datetime.now(),self.positions)
+        print("processPos:", datetime.now(), self.positions)
         for strategyId, pos in self.positions.items():
             data = []
             for symbol, volume in pos.items():
                 d = {
-                        "market": self.contractMap[symbol],
+                        "market": self.contractMap[symbol]["exchange"],
                         "symbol": symbol,
                         "volume": abs(volume)
                     }
@@ -503,9 +544,11 @@ class CtpGateway(VtGateway):
                     
             self.ref += 1
             self.send_TP(str(self.ref), strategyId, data)
+        with open(getTempPath('positions.json'),'w') as f:
+            json.dump(self.positions, f, indent=4, ensure_ascii=False)
 
     def send_TP(self, ref, strategyId, result):
-        print("self.send_TP_Time",self.send_TP_Time)
+        print("self.send_TP_Time: ", self.send_TP_Time)
         if not self.send_TP_Time:
             self.send_TP_Time = datetime.now()
         if (datetime.now()-self.send_TP_Time).total_seconds() > 299:
@@ -544,7 +587,7 @@ class CtpGateway(VtGateway):
                 }
             }
             """
-            self.mdApi.writeLog(r.text)
+            self.mdApi.writeLog(f"HQ return: {r.text}")
             self.send_TP_Time = datetime.now()
 
 ########################################################################
@@ -829,7 +872,6 @@ class CtpTdApi(TdApi):
         self.posDict = {}
         self.symbolExchangeDict = {}        # 保存合约代码和交易所的印射关系
         self.symbolSizeDict = {}            # 保存合约代码和合约大小的印射关系
-        self.contractDict = []
 
         self.requireAuthentication = False
 
@@ -1154,7 +1196,13 @@ class CtpTdApi(TdApi):
         # 推送
         self.gateway.onContract(contract)
 
-        self.gateway.contractMap.update({contract.symbol:contract.exchange})
+        self.gateway.contractMap.update({contract.symbol:{
+            "exchange":contract.exchange,
+            "multiple":contract.size,
+            "long_marginrate":data["LongMarginRatio"],
+            "short_marginrate":data["ShortMarginRatio"],
+            "max_vol":data["MaxLimitOrderVolume"],
+            "min_vol":data["MinLimitOrderVolume"]}})
         with open(getTempPath('contractMap.json'),'w') as f:
             json.dump(self.gateway.contractMap, f, indent=4, ensure_ascii=False)
 
@@ -1457,7 +1505,7 @@ class CtpTdApi(TdApi):
         {'InstrumentID': 'IF1811', 'LimitPrice': 3157.8, 'VolumeTotalOriginal': 1, 'OrderPriceType': '2', 'Direction': '0', 'CombOffsetFlag': '0', 'OrderRef': '1', 'InvestorID': '119247', 'UserID': '119247', 
         'BrokerID': '9999', 'CombHedgeFlag': '1', 'ContingentCondition': '1', 'ForceCloseReason': '0', 'IsAutoSuspend': 0, 'TimeCondition': '3', 'VolumeCondition': '1', 'MinVolume': 1}
         """
-        self.reqID += 1
+        # self.reqID += 1
         self.orderRef += 1
 
         # req = {}
@@ -1510,19 +1558,19 @@ class CtpTdApi(TdApi):
     #----------------------------------------------------------------------
     def cancelOrder(self, cancelOrderReq):
         """撤单"""
-        self.reqID += 1
+        # self.reqID += 1
 
-        req = {}
+        # req = {}
 
-        req['InstrumentID'] = cancelOrderReq.symbol
-        req['ExchangeID'] = cancelOrderReq.exchange
-        req['OrderRef'] = cancelOrderReq.orderID
-        req['FrontID'] = cancelOrderReq.frontID
-        req['SessionID'] = cancelOrderReq.sessionID
+        # req['InstrumentID'] = cancelOrderReq.symbol
+        # req['ExchangeID'] = cancelOrderReq.exchange
+        # req['OrderRef'] = cancelOrderReq.orderID
+        # req['FrontID'] = cancelOrderReq.frontID
+        # req['SessionID'] = cancelOrderReq.sessionID
 
-        req['ActionFlag'] = defineDict['THOST_FTDC_AF_Delete']
-        req['BrokerID'] = self.brokerID
-        req['InvestorID'] = self.userID
+        # req['ActionFlag'] = defineDict['THOST_FTDC_AF_Delete']
+        # req['BrokerID'] = self.brokerID
+        # req['InvestorID'] = self.userID
 
         # self.reqOrderAction(req, self.reqID)
         order = self.gateway.pendingOrder.pop(cancelOrderReq.orderID,None)
@@ -1530,7 +1578,7 @@ class CtpTdApi(TdApi):
             order.status = STATUS_CANCELLED
             self.gateway.onOrder(order)
         else:
-            self.writeLog(f"cancel failed: {cancelOrderReq.orderID}")
+            self.writeLog(f"cancel failed: {cancelOrderReq.orderID} order not exists")
 
     #----------------------------------------------------------------------
     def close(self):
